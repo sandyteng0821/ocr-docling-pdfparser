@@ -1,0 +1,19 @@
+# 核心解析引擎
+docling>=2.0.0
+docling-core>=1.0.0
+
+# PDF 與影像處理
+pypdfium2>=4.0.0
+opencv-python-headless  # 伺服器端建議用 headless 版本，省去 GUI 依賴
+pillow>=10.0.0
+
+# OCR 支援 (如果 mode="ocr" 需搭配系統安裝 Tesseract)
+pytesseract
+
+# 資料處理與正則輔助
+regex
+numpy
+
+# 開發與除錯
+tqdm  # 顯示進度條
+python-dotenv  # 讀取 PDF_PATH 等環境變數

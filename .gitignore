@@ -1,0 +1,16 @@
+# 虛擬環境
+venv/
+.env
+
+# 數據與輸出 (不要推上 GitHub)
+*.pdf
+extracted_docling/
+extracted_excipients/
+
+# Python 暫存
+__pycache__/
+*.py[cod]
+
+# 日誌與系統
+*.log
+.DS_Store
