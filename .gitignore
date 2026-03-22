@@ -13,4 +13,6 @@ __pycache__/
 
 # 日誌與系統
 *.log
-.DS_Store
+.DS_Storeextracted_*/
+src/parser-backup.py
+src/parser-v6-test-v1-not-working.py
