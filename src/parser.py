@@ -110,24 +110,23 @@ class ExcipientBookParser:
         for i, page_text in enumerate(pages_text):
             actual_index = i + page_offset
 
-            if re.search(r'^\s*1\s+Nonproprietary Names\s*$', page_text, re.MULTILINE):
+            is_new_anchor = False
+            anchor_pattern = r'^\s*1\s+Nonproprietary Names\s*$'
+            if self.book_version >= 6:
+                # v6/v9 的 1. 通常出現在頁面前 1000 字元內，若在頁尾通常是參考文獻誤判
+                match = re.search(anchor_pattern, page_text, re.MULTILINE)
+                if match and match.start() < 1000:
+                    is_new_anchor = True
+                else:
+                    is_new_anchor = re.search(anchor_pattern, page_text, re.MULTILINE)
+            if is_new_anchor:
                 if current_excipient:
                     self.save_to_json(current_excipient, "\n".join(current_content))
                     current_content = []
-                # 掃整頁找 __HEADER__ 標記（v6 藥名可能不在第一行）
-                header_match = re.search(r'^__HEADER__ (.+)$', page_text, re.MULTILINE)
-                if header_match:
-                    first_line = header_match.group(1).strip()
-                else:
-                    # 嘗試從當前頁第一行取得藥名
-                    first_line = page_text.split('\n')[0].strip()
-                    if not first_line or re.match(r'^\s*1\s+Nonproprietary Names\s*$', first_line):
-                        # v5 原本邏輯，同時也是 v6 的 fallback
-                        first_line = self._extract_name_from_section1(page_text)
-                        if not first_line:
-                            first_line = f"Unknown_{actual_index}"
 
-                # index 直接對應修正
+                # 套用v6+提取名稱的優先級 (via _smart_extract_name)
+                first_line = self._smart_extract_name(page_text, actual_index)
+                # 套用已知修正 (原始修正邏輯 # index 直接對應修正)
                 if actual_index in self.index_corrections:
                     first_line = self.index_corrections[actual_index]
 
@@ -159,53 +158,93 @@ class ExcipientBookParser:
 
         print("完成！")
 
+    def _smart_extract_name(self, page_text, actual_index):
+            lines = [l.strip() for l in page_text.split('\n') if l.strip()]
+            if not lines: return f"Unknown_{actual_index}"
+
+            # 策略 A: 找尋 Docling 的 Header 標記 (v6/v9 強項)
+            header_match = re.search(r'^__HEADER__ (.+)$', page_text, re.MULTILINE)
+            if header_match:
+                candidate = header_match.group(1).strip()
+                if 2 < len(candidate) < 60: return candidate
+
+            # 策略 B: 找尋 "1 Nonproprietary Names" 之前的那一行 (v6 常用排版)
+            try:
+                for i, line in enumerate(lines):
+                    if "1 Nonproprietary Names" in line:
+                        if i > 0:
+                            candidate = lines[i-1]
+                            # 過濾掉可能是頁碼或頁首文字的噪音
+                            if 2 < len(candidate) < 60 and "Handbook" not in candidate:
+                                return candidate
+                        break
+            except: pass
+
+            # 策略 C: Fallback 到你原本精妙的 v5 Section 1 反推邏輯
+            fallback = self._extract_name_from_section1(page_text)
+            
+            # 關鍵優化：防止 fallback 抓到整段話
+            if fallback and len(fallback) < 60:
+                return fallback
+
+            return f"Unknown_{actual_index}"
+
     def _extract_name_from_section1(self, page_text: str) -> str:
         """
-        v5 主要路徑，同時作為 v6 的 fallback。
-        從 Section 1 內容反推藥名，處理以下格式：
-          - 'JP: Agar'                           → Agar
-          - 'BP: Sucrose JP: Sucrose ...'         → Sucrose
-          - 'BP: Hypromellose phthalate JP: ...' → Hypromellose Phthalate
-          - '(a) USPNF: Butane'                  → 群組型
-          - 'See Table I.'                        → 群組型，從內文找
+        從 Section 1 內容反推藥名。
+        針對 v6 優化：確保能處理跨行的藥典定義（如 BP: Acacia）。
         """
         lines = [l.strip() for l in page_text.split('\n') if l.strip()]
-
-        section1_line = ""
+        
+        # 1. 提取 Section 1 到 Section 2 之間的所有行
+        section1_content = []
+        found_s1 = False
         for line in lines:
             if re.match(r'^\s*1\s+Nonproprietary Names\s*$', line):
+                found_s1 = True
                 continue
-            if re.match(r'^\s*2\s+', line):
-                break
-            section1_line = line
-            break
+            if found_s1:
+                if re.match(r'^\s*2\s+', line): break
+                section1_content.append(line)
+        
+        if not section1_content:
+            return ""
 
-        if not section1_line or section1_line == "See Table I.":
+        # 針對 "See Table I." 的群組型處理
+        if section1_content[0] == "See Table I.":
             for line in lines:
-                if re.match(r'^\s*6\s+Functional Category', line):
-                    break
-                if re.match(r'^\s*\d+\s+[A-Z]', line):
-                    continue
+                if re.match(r'^\s*6\s+Functional Category', line): break
+                if re.match(r'^\s*\d+\s+[A-Z]', line): continue
                 if len(line) > 5 and not re.search(r'[:;,\(\)]', line):
                     return line
             return ""
 
-        grouped = re.match(r'^\([a-z]\)\s+(?:BP|JP|PhEur|USPNF|USP|NF|BPC):\s*(.+)', section1_line)
+        # 2. 合併 Section 1 內容進行 Regex 匹配 (解決 Acacia 換行問題)
+        full_s1_text = "\n".join(section1_content)
+        pharmacopeias = r'(?:BP|JP|PhEur|USPNF|USP|NF|BPC|PhInt)'
+
+        # 策略 A: 處理 (a) USPNF: Butane 格式
+        grouped = re.search(rf'^\([a-z]\)\s+{pharmacopeias}:\s*(.+)', full_s1_text, re.MULTILINE)
         if grouped:
             return grouped.group(1).strip().split()[0]
 
-        pharmacopeias = r'(?:BP|JP|PhEur|USPNF|USP|NF|BPC|PhInt)'
-        matches = re.findall(
-            rf'(?:{pharmacopeias}):\s*([A-Za-z][\w\s,\-\(\)/]+?)(?=\s+{pharmacopeias}:|$)',
-            section1_line
-        )
-        if matches:
-            english_names = [
-                m.strip() for m in matches
-                if not re.search(r'(?:um|us|is|ae|ium)\s*$', m.strip(), re.IGNORECASE)
-            ]
-            candidates = english_names if english_names else [m.strip() for m in matches]
-            return min(candidates, key=len)
+        # 策略 B: 核心匹配邏輯 (優化版)
+        # 抓取藥典縮寫後面的字元，直到下一個藥典標記、換行、逗號或分號
+        match = re.search(rf'{pharmacopeias}:\s*([^;,\n\t]+)', full_s1_text)
+        if match:
+            raw_name = match.group(1).strip()
+            # 排除掉後方可能連帶抓到的藥典標記 (例如抓到 "Acacia JP")
+            clean_name = re.split(rf'\s+{pharmacopeias}:', raw_name)[0].strip()
+            
+            if 2 < len(clean_name) < 50:
+                return clean_name
+
+        # 3. Fallback: 找 "1 Nonproprietary Names" 之前的那一行
+        for i, line in enumerate(lines):
+            if "1 Nonproprietary Names" in line and i > 0:
+                candidate = lines[i-1]
+                if 2 < len(candidate) < 60 and "Handbook" not in candidate:
+                    return candidate
 
         return ""
 
